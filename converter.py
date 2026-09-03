@@ -12,6 +12,7 @@ carpeta de salida.
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -36,9 +37,32 @@ _MAC_TESSERACT_CANDIDATES = [
     "/usr/local/bin/tesseract",  # Intel (Homebrew)
 ]
 
+# Ruta relativa al ejecutable/script donde puede venir un Tesseract
+# empaquetado junto a la app (ver .github/workflows/build.yml), para que el
+# usuario final no tenga que instalar nada aparte.
+_BUNDLED_DIRNAME = "tesseract-bin"
+
+_bundled_tessdata_dir: Optional[Path] = None
+
+
+def _app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _bundled_tesseract_path() -> Optional[Path]:
+    exe_name = "tesseract.exe" if sys.platform == "win32" else "tesseract"
+    candidate = _app_base_dir() / _BUNDLED_DIRNAME / exe_name
+    return candidate if candidate.is_file() else None
+
 
 def locate_tesseract() -> Optional[str]:
-    """Busca el ejecutable de Tesseract en el PATH y en ubicaciones típicas."""
+    """Busca Tesseract: primero uno empaquetado junto a la app, después en
+    el PATH del sistema y en ubicaciones típicas de instalación."""
+    bundled = _bundled_tesseract_path()
+    if bundled:
+        return str(bundled)
     found = shutil.which("tesseract")
     if found:
         return found
@@ -51,6 +75,25 @@ def locate_tesseract() -> Optional[str]:
 
 def configure_tesseract() -> bool:
     """Configura pytesseract con la ruta encontrada. Devuelve True si lo encontró."""
+    global _bundled_tessdata_dir
+    bundled = _bundled_tesseract_path()
+    if bundled:
+        pytesseract.pytesseract.tesseract_cmd = str(bundled)
+        bundled_dir = bundled.parent
+        tessdata = bundled_dir / "tessdata"
+        _bundled_tessdata_dir = tessdata if tessdata.is_dir() else None
+        if sys.platform.startswith("linux"):
+            # Las .so de Tesseract/Leptonica que viajan empaquetadas junto
+            # al binario no están en el loader path del sistema del usuario.
+            existing = os.environ.get("LD_LIBRARY_PATH", "")
+            lib_path = str(bundled_dir)
+            if lib_path not in existing.split(":"):
+                os.environ["LD_LIBRARY_PATH"] = (
+                    f"{lib_path}:{existing}" if existing else lib_path
+                )
+        return True
+
+    _bundled_tessdata_dir = None
     path = locate_tesseract()
     if path:
         pytesseract.pytesseract.tesseract_cmd = path
@@ -96,7 +139,8 @@ def _ocr_page(page: fitz.Page, lang: str) -> str:
         )
     pix = page.get_pixmap(dpi=OCR_DPI)
     img = Image.open(io.BytesIO(pix.tobytes("png")))
-    text = pytesseract.image_to_string(img, lang=lang)
+    config = f'--tessdata-dir "{_bundled_tessdata_dir}"' if _bundled_tessdata_dir else ""
+    text = pytesseract.image_to_string(img, lang=lang, config=config)
     return text.strip()
 
 

@@ -26,7 +26,12 @@ jobs:
 
       - name: Instalar dependencias del sistema (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk tesseract-ocr tesseract-ocr-spa
+        run: sudo apt-get update && sudo apt-get install -y python3-tk tesseract-ocr
+
+      - name: Instalar Tesseract (Windows, para empaquetarlo con la app)
+        if: matrix.os == 'windows-latest'
+        run: choco install tesseract --no-progress -y
+        shell: pwsh
 
       - name: Instalar dependencias Python
         run: |
@@ -36,6 +41,50 @@ jobs:
 
       - name: Compilar con PyInstaller
         run: pyinstaller --noconfirm build.spec
+
+      # --- Empaquetar Tesseract junto al ejecutable, para que el usuario
+      # final no tenga que instalar nada aparte. Solo Windows y Linux: en
+      # macOS se sigue asumiendo `brew install tesseract` (ver README). ---
+
+      - name: Empaquetar Tesseract (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $dest = "dist\ConversorPDFaMD\tesseract-bin"
+          New-Item -ItemType Directory -Force -Path $dest, "$dest\tessdata" | Out-Null
+          $tessSrc = "C:\Program Files\Tesseract-OCR"
+          Copy-Item "$tessSrc\tesseract.exe" $dest
+          Copy-Item "$tessSrc\*.dll" $dest -ErrorAction SilentlyContinue
+          curl.exe -L -o "$dest\tessdata\eng.traineddata" `
+            "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+          curl.exe -L -o "$dest\tessdata\spa.traineddata" `
+            "https://github.com/tesseract-ocr/tessdata_fast/raw/main/spa.traineddata"
+          & "$dest\tesseract.exe" --version
+
+      - name: Empaquetar Tesseract (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          dest="dist/ConversorPDFaMD/tesseract-bin"
+          mkdir -p "$dest/tessdata"
+          tess_bin="$(command -v tesseract)"
+          cp "$tess_bin" "$dest/tesseract"
+          # Vendorizar las librerías dinámicas específicas de Tesseract/Leptonica
+          # (se excluyen las libs base del sistema: glibc, pthread, etc., que
+          # asumimos presentes en cualquier Linux moderno x86_64).
+          for lib in $(ldd "$tess_bin" | awk '{print $3}' | grep -E '^/'); do
+            base="$(basename "$lib")"
+            case "$base" in
+              libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|ld-linux*|libresolv.so*)
+                continue ;;
+            esac
+            cp -n "$lib" "$dest/" || true
+          done
+          curl -L -o "$dest/tessdata/eng.traineddata" \
+            "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+          curl -L -o "$dest/tessdata/spa.traineddata" \
+            "https://github.com/tesseract-ocr/tessdata_fast/raw/main/spa.traineddata"
+          chmod +x "$dest/tesseract"
+          LD_LIBRARY_PATH="$dest" "$dest/tesseract" --version
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v4
